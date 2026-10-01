@@ -58,34 +58,49 @@ export function getUserProfile () {
         if (!code) {
           throw new Error('Username is null')
         }
-        const singleQuoteRegex = /^'(?:[^'\\]|\\.)*'$/
-        const doubleQuoteRegex = /^"(?:[^"\\]|\\.)*"$/
-        const backtickRegex = /^`(?:[^`\\$]|\\.|\$(?!{))*`$/
-        const numericRegex = /^-?\d+(?:\.\d+)?$/
+        const singleQuoteRegex = /^'(?:[^'\\#!]|\\.)*'$/
+        const doubleQuoteRegex = /^\"(?:[^\"\\#!]|\\.)*\"$/
+        const backtickRegex = /^`(?:[^`\\$#!]|\\.|\$(?!{))*`$/
+        const numericRegex = /^[0-9\s+\-*/().%]+$/
         const booleanRegex = /^(?:true|false|null|undefined)$/
 
-        const isSafe = singleQuoteRegex.test(code) ||
-          doubleQuoteRegex.test(code) ||
-          backtickRegex.test(code) ||
-          numericRegex.test(code) ||
-          booleanRegex.test(code)
+        const isSafe = !code.includes('#') &&
+          !code.includes('!') &&
+          !/[\r\n]/.test(code) && (
+            singleQuoteRegex.test(code) ||
+            doubleQuoteRegex.test(code) ||
+            backtickRegex.test(code) ||
+            numericRegex.test(code) ||
+            booleanRegex.test(code)
+          )
 
         if (!isSafe) {
           throw new Error('Unsafe code execution blocked')
         }
         username = eval(code) // eslint-disable-line no-eval
+        if (typeof username === 'string' && (username.includes('#{') || username.includes('!{') || /[\r\n]/.test(username))) {
+          throw new Error('Unsafe code execution blocked')
+        }
+        if (typeof username === 'string') {
+          const escaped = username.replace(/([#!]\{)/g, '\\$1')
+          username = escaped.startsWith('\\') ? escaped : '\\' + escaped
+        }
       } catch (err) {
-        username = '\\' + username
+        const raw = (user.username ?? '').replace(/[\r\n]/g, '')
+        const escaped = raw.replace(/([#!]\{)/g, '\\$1')
+        username = escaped.startsWith('\\') ? escaped : '\\' + escaped
       }
     } else {
-      username = '\\' + username
+      const raw = (user.username ?? '').replace(/[\r\n]/g, '')
+      const escaped = raw.replace(/([#!]\{)/g, '\\$1')
+      username = escaped.startsWith('\\') ? escaped : '\\' + escaped
     }
 
     const themeKey = config.get<string>('application.theme') as keyof typeof themes
     const theme = themes[themeKey] || themes['bluegrey-lightgreen']
 
-    if (username) {
-      template = template.replace(/_username_/g, username)
+    if (username !== undefined && username !== null && username !== '') {
+      template = template.replace(/_username_/g, String(username))
     }
     template = template.replace(/_emailHash_/g, security.hash(user?.email))
     template = template.replace(/_title_/g, entities.encode(config.get<string>('application.name')))
@@ -100,10 +115,17 @@ export function getUserProfile () {
     try {
       const pug = (await import('pug')).default
       const fn = pug.compile(template)
-      const CSP = `img-src 'self' ${user?.profileImage}; script-src 'self' 'unsafe-eval'`
+      let profileImage = ''
+      if (typeof user?.profileImage === 'string') {
+        const sanitized = user.profileImage.split(/[;\s\r\n]/)[0].trim()
+        if (!/['"<>]/.test(sanitized)) {
+          profileImage = sanitized
+        }
+      }
+      const CSP = `img-src 'self'${profileImage ? ` ${profileImage}` : ''}; script-src 'self' 'unsafe-eval'`
 
       challengeUtils.solveIf(challenges.usernameXssChallenge, () => {
-        return username && user?.profileImage.match(/;[ ]*script-src(.)*'unsafe-inline'/g) !== null && utils.contains(username, '<script>alert(`xss`)</script>')
+        return Boolean(username && CSP.match(/;[ ]*script-src(.)*'unsafe-inline'/g) !== null && utils.contains(username, '<script>alert(`xss`)</script>'))
       })
 
       res.set({
